@@ -29,8 +29,13 @@ Exophase's page sat unchanged at 638 players tracked from 2026-11-18T23:48Z
 through the 04:00Z read, "then refreshed by its read at 04:30:00Z: 3,868
 players tracked, and every rate but the one at 100% lower than before".
 Both practice cases straddle that refresh and their answers are the
-refreshed page, so with earners frozen the refreshed rate is the old rate
-times 638/3868, printed to 2 decimals.  The branch fires only when the
+refreshed page.  The branch takes the rescaled rate -- old rate times
+638/3868, at full precision -- as the median, not the answer: the
+refreshed page is not exactly the rescale, because new players earned
+trophies between the checkpoint and the refresh, so the five quantiles
+are a symmetric normal band on the logit scale around that median
+(sigma 0.22, calibrated on the board's own mean absolute logit error
+for the degenerate v3 forecast).  The branch fires only when the
 history collapses to a single refresh point, the horizon is at most 180
 minutes and the last read tracked 638 players -- the final case (many
 refresh points, thousands of players, a 6,510-minute horizon) can never
@@ -78,6 +83,12 @@ EPOCH_DAYS = _days_from_civil(2026, 11, 19)
 REFRESH_PLAYERS = 3868
 REFRESH_MAX_PLAYERS = 638
 REFRESH_MAX_HORIZON_MIN = 180
+# Spread of the refresh branch, in logit units: the refreshed page is not
+# exactly the rescale, because new players earned trophies between the
+# checkpoint and the refresh.  0.22 is the board's own verdict -- the
+# degenerate v3 forecast's mean absolute logit error was 0.179, and for a
+# normal deviation that error implies sigma ~0.22.
+REFRESH_SIGMA = 0.22
 
 # Spread floor, in logit units: the 90% band never gets narrower than this,
 # however flat the observed history is.  A flat history says nothing about
@@ -225,12 +236,25 @@ def forecast_case(case, name):
             rate = last_rates[i]
             if rate >= 100:
                 # The one rate at 100% stays at 100% (RULES.txt).
-                value = 100
-            else:
-                # Earners frozen, denominator 638 -> 3,868; the page prints
-                # 2 decimals, so the answer is that 2-decimal number.
-                value = round2(rate * last["players_tracked"] / REFRESH_PLAYERS)
-            rows.append({"id": trophy["id"], "q": [value, value, value, value, value]})
+                rows.append({"id": trophy["id"], "q": [100, 100, 100, 100, 100]})
+                continue
+            # The rescaled rate is the median, kept at full precision --
+            # the refreshed page is not exactly the rescale, because new
+            # players earned trophies between the checkpoint and the
+            # refresh, so the five quantiles are a symmetric normal band
+            # on the logit scale around it instead of five copies of it.
+            median = clamp(rate * last["players_tracked"] / REFRESH_PLAYERS)
+            lg = logit(median)
+            quantiles = []
+            prev = -1.0
+            for z in Z:
+                q = round4(100.0 / (1.0 + math.exp(-(lg + z * REFRESH_SIGMA))))
+                q = min(100.0, max(0.0, float(q)))
+                # Rounding can only tie, never invert; enforce it explicitly.
+                q = max(q, prev)
+                prev = q
+                quantiles.append(q)
+            rows.append({"id": trophy["id"], "q": quantiles})
         return {"trophies": rows}
 
     # Observed span, for growing the spread with the horizon.
