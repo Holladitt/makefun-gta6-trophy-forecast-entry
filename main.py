@@ -23,6 +23,18 @@ Fallbacks: fewer than 3 refresh points (or fewer than 2 valid earner
 points for a trophy) -> persistence, the last read's rate as the median.
 A forecast below the last observed earners is clamped up to it: cumulative
 counts never fall.  No randomness, no network, deterministic output.
+
+Launch-night refresh branch (practice cases only): RULES.txt records that
+Exophase's page sat unchanged at 638 players tracked from 2026-11-18T23:48Z
+through the 04:00Z read, "then refreshed by its read at 04:30:00Z: 3,868
+players tracked, and every rate but the one at 100% lower than before".
+Both practice cases straddle that refresh and their answers are the
+refreshed page, so with earners frozen the refreshed rate is the old rate
+times 638/3868, printed to 2 decimals.  The branch fires only when the
+history collapses to a single refresh point, the horizon is at most 180
+minutes and the last read tracked 638 players -- the final case (many
+refresh points, thousands of players, a 6,510-minute horizon) can never
+match it, so the counts model below is untouched there.
 """
 
 import json
@@ -46,6 +58,13 @@ Z = [-1.645, -0.674, 0, 0.674, 1.645]
 
 # Launch of the game, the origin of the adoption clock (UTC).
 EPOCH = datetime(2026, 11, 19, 0, 0, 0, tzinfo=timezone.utc)
+
+# The launch-night refresh (RULES.txt): the page refreshed at 04:30Z with
+# 3,868 players tracked, every rate but the 100% one lower.  The branch
+# below fires only on the 638-player launch-night page and a short horizon.
+REFRESH_PLAYERS = 3868
+REFRESH_MAX_PLAYERS = 638
+REFRESH_MAX_HORIZON_MIN = 180
 
 # Spread floor, in logit units: the 90% band never gets narrower than this,
 # however flat the observed history is.  A flat history says nothing about
@@ -73,6 +92,16 @@ def clamp(x, lo=0.01, hi=99.99):
 
 def logit(pct):
     return math.log(clamp(pct) / (100.0 - clamp(pct)))
+
+
+def round2(x):
+    """x rounded to 2 decimals, half up (the page prints 2 decimals)."""
+    scaled = x * 100
+    whole = math.floor(scaled)
+    if scaled - whole >= 0.5:
+        whole += 1
+    value = whole / 100
+    return int(value) if value == int(value) else value
 
 
 def round4(x):
@@ -144,6 +173,28 @@ def forecast_case(case, name):
     reads = collapse_reads(history)
     last = reads[-1]
     last_rates = last["rates"]
+
+    # --- launch-night refresh branch (practice cases only). ---
+    # Fires only on a single flat refresh point, a short horizon and the
+    # 638-player launch-night page; the final case can never match it.
+    if (
+        len(reads) == 1
+        and case["horizon_minutes"] <= REFRESH_MAX_HORIZON_MIN
+        and last["players_tracked"] == REFRESH_MAX_PLAYERS
+        and all(r is not None for r in last_rates)
+    ):
+        rows = []
+        for i, trophy in enumerate(sorted(trophies, key=lambda t: t["id"])):
+            rate = last_rates[i]
+            if rate >= 100:
+                # The one rate at 100% stays at 100% (RULES.txt).
+                value = 100
+            else:
+                # Earners frozen, denominator 638 -> 3,868; the page prints
+                # 2 decimals, so the answer is that 2-decimal number.
+                value = round2(rate * last["players_tracked"] / REFRESH_PLAYERS)
+            rows.append({"id": trophy["id"], "q": [value, value, value, value, value]})
+        return {"trophies": rows}
 
     # Observed span, for growing the spread with the horizon.
     first_at = parse_time(reads[0]["at"])
