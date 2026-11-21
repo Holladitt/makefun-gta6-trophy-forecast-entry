@@ -41,23 +41,36 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
 
 # The grader's -P leaves /bot off sys.path: put it back first, so `import model`
 # finds a model.py shipped beside this file.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
-OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
+INPUT_DIR = os.environ.get("MAKEFUN_INPUT_DIR", "/input")
+OUTPUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
 
 # The quantile levels the contest scores, in the order each row lists them.
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # The standard normal's quantile at each level.
 Z = [-1.645, -0.674, 0, 0.674, 1.645]
 
-# Launch of the game, the origin of the adoption clock (UTC).
-EPOCH = datetime(2026, 11, 19, 0, 0, 0, tzinfo=timezone.utc)
+# Launch of the game, the origin of the adoption clock: days since
+# 1970-01-01 for 2026-11-19 (UTC).  Timestamps are parsed to seconds
+# since this epoch with plain integer math (no datetime import: the
+# module alone costs ~0.6 ms of startup, and pathlib ~8.5 ms).
+def _days_from_civil(y, m, d):
+    """Days since 1970-01-01 (Howard Hinnant's civil-date algorithm)."""
+    if m <= 2:
+        y -= 1
+    era = (y if y >= 0 else y - 399) // 400
+    yoe = y - era * 400
+    mp = (m + 9) % 12
+    doy = (153 * mp + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+EPOCH_DAYS = _days_from_civil(2026, 11, 19)
 
 # The launch-night refresh (RULES.txt): the page refreshed at 04:30Z with
 # 3,868 players tracked, every rate but the 100% one lower.  The branch
@@ -77,13 +90,37 @@ MIN_SPAN_DAYS = 0.5
 
 
 def parse_time(text):
-    """ISO 8601 UTC timestamp -> aware datetime."""
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    """ISO 8601 timestamp -> seconds since the launch epoch (float).
+
+    Accepts 'YYYY-MM-DDTHH:MM:SS[.frac][Z|+HH:MM]'; every case timestamp
+    is UTC (Z).  Plain string slicing and integer math, no datetime.
+    """
+    year = int(text[0:4])
+    month = int(text[5:7])
+    day = int(text[8:10])
+    hour = int(text[11:13])
+    minute = int(text[14:16])
+    second = int(text[17:19])
+    frac = 0.0
+    i = 19
+    if i < len(text) and text[i] == ".":
+        j = i + 1
+        while j < len(text) and text[j].isdigit():
+            j += 1
+        frac = int(text[i + 1:j]) / (10 ** (j - i - 1))
+        i = j
+    offset = 0
+    if i < len(text) and text[i] in "+-":
+        offset = int(text[i + 1:i + 3]) * 3600 + int(text[i + 4:i + 6]) * 60
+        if text[i] == "-":
+            offset = -offset
+    days = _days_from_civil(year, month, day) - EPOCH_DAYS
+    return days * 86400 + hour * 3600 + minute * 60 + second + frac - offset
 
 
 def hours_since_launch(moment):
     """Hours from the launch epoch to a moment (never negative)."""
-    return max(0.0, (moment - EPOCH).total_seconds() / 3600.0)
+    return max(0.0, moment / 3600.0)
 
 
 def clamp(x, lo=0.01, hi=99.99):
@@ -199,7 +236,7 @@ def forecast_case(case, name):
     # Observed span, for growing the spread with the horizon.
     first_at = parse_time(reads[0]["at"])
     last_at = parse_time(last["at"])
-    span_days = max((last_at - first_at).total_seconds() / 86400.0, MIN_SPAN_DAYS)
+    span_days = max((last_at - first_at) / 86400.0, MIN_SPAN_DAYS)
     growth = math.sqrt(horizon_days / span_days)
 
     # --- players_tracked: monotone, log-space power-law fit. ---
@@ -279,13 +316,14 @@ def forecast_case(case, name):
 
 
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     # Every case file, in name order, so two runs write the same bytes.
-    for path in sorted(INPUT_DIR.glob("*.in")):
-        case = json.loads(path.read_text(encoding="utf-8"))
-        forecast = forecast_case(case, path.name)
-        (OUTPUT_DIR / f"{path.stem}.out").write_text(
-            json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
+    for name in sorted(n for n in os.listdir(INPUT_DIR) if n.endswith(".in")):
+        with open(os.path.join(INPUT_DIR, name), encoding="utf-8") as fh:
+            case = json.loads(fh.read())
+        forecast = forecast_case(case, name)
+        with open(os.path.join(OUTPUT_DIR, name[:-3] + ".out"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(forecast, separators=(",", ":")) + "\n")
 
 
 if __name__ == "__main__":
